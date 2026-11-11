@@ -1,5 +1,5 @@
 // 記帳本離線快取。更新 index.html 後，把下面的版本號加 1，手機才會換成新版。
-const CACHE = 'ledger-v3';
+const CACHE = 'ledger-v4';
 const FILES = ['./', './index.html', './manifest.json', './icon-180.png', './icon-512.png'];
 
 self.addEventListener('install', e => {
