@@ -293,6 +293,16 @@ select.input{background-image:linear-gradient(45deg,transparent 50%,var(--muted)
 .ds-add{flex:none;padding:7px 12px;border-radius:18px;background:color-mix(in srgb,var(--pri) 12%,transparent);color:var(--pri);font-size:14px;font-weight:600}
 .day-empty{background:var(--card);border-radius:14px;padding:18px;text-align:center;color:var(--muted);font-size:14px}
 
+.tag.ghost{color:var(--muted);background:var(--chip)}
+.row.sched .amt{color:var(--muted)}
+.row.skipped .amt,.row.skipped .row-s{text-decoration:line-through;opacity:.6}
+.sub-h{font-size:12.5px;color:var(--muted);padding:12px 4px 6px}
+.cd-a.sch{color:var(--muted);font-weight:500}
+.cd-s{position:absolute;top:5px;left:5px;width:7px;height:7px;border-radius:50%;border:1.5px solid var(--pri)}
+.lg.sch{border-radius:50%;width:8px;height:8px;border:1.5px solid var(--pri);background:none;vertical-align:0}
+.bpill{flex:none;color:var(--pri);font-weight:600;font-size:13.5px;border:0;background:color-mix(in srgb,var(--pri) 12%,var(--card))}
+.bpill.off{color:var(--muted);font-weight:500;background:var(--card);text-decoration:line-through;text-decoration-color:color-mix(in srgb,var(--muted) 60%,transparent)}
+
 /* toast */
 #toast{position:fixed;left:50%;top:calc(env(safe-area-inset-top) + 14px);transform:translate(-50%,-16px);z-index:40;background:#1E2A3A;color:#fff;padding:11px 16px;border-radius:12px;font-size:14px;display:flex;gap:14px;align-items:center;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;max-width:calc(100% - 32px);box-shadow:0 8px 24px rgba(0,0,0,.25)}
 #toast.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
@@ -346,7 +356,7 @@ function defaultCats(){
   const mk=(type,arr)=>arr.map(([name,icon,color],i)=>({id:uid(),type,name,icon,color,order:i}));
   return [...mk('expense',E),...mk('income',I)];
 }
-function defaults(){return {version:1,categories:defaultCats(),tx:[],recurring:[],pending:[],settings:{theme:'auto',lastBackup:null,listView:'calendar',weekStart:0,budget:{period:'none',amount:0,excludeFixed:true}},lastCat:{}}}
+function defaults(){return {version:1,categories:defaultCats(),tx:[],recurring:[],pending:[],overrides:{},settings:{theme:'auto',lastBackup:null,listView:'calendar',weekStart:0,budget:{period:'none',amount:0,excludeFixed:true}},lastCat:{}}}
 function normalize(d){
   const b=defaults();d=d||{};
   return {version:1,
@@ -354,6 +364,7 @@ function normalize(d){
     tx:Array.isArray(d.tx)?d.tx.filter(t=>t&&t.date&&isFinite(t.amount)):[],
     recurring:Array.isArray(d.recurring)?d.recurring:[],
     pending:Array.isArray(d.pending)?d.pending:[],
+    overrides:d.overrides&&typeof d.overrides==='object'&&!Array.isArray(d.overrides)?d.overrides:{},
     settings:{...b.settings,...(d.settings||{})},
     lastCat:d.lastCat||{}};
 }
@@ -381,6 +392,31 @@ function matches(r,s){
   if(r.freq==='yearly')return m===r.month&&day===Math.min(r.day,dim(y,m));
   return false;
 }
+const okey=(rid,d)=>rid+'|'+d;
+const recNb=r=>r.inBudget===undefined?undefined:!r.inBudget;
+function occTx(r,d,amount){
+  const ov=S.overrides[okey(r.id,d)]||{};
+  const t={id:uid(),type:r.type,amount,cat:ov.cat||r.cat,date:d,note:ov.note!==undefined?ov.note:r.name,rid:r.id,created:Date.now()};
+  const nb=ov.nb!==undefined?ov.nb:recNb(r);if(r.type==='expense'&&nb!==undefined)t.nb=nb;
+  return t;
+}
+/* 本月之後才會發生的固定收支（尚未入帳），用來顯示在日曆上 */
+function scheduled(from,to){
+  const out=[];
+  for(const r of S.recurring){
+    if(!r.active)continue;
+    let d=addDays(r.lastRun||addDays(r.start,-1),1);if(d<r.start)d=r.start;if(d<from)d=from;
+    for(let g=0;d<=to&&g<400;g++,d=addDays(d,1)){
+      if(r.end&&d>r.end)break;
+      if(!matches(r,d))continue;
+      const k=okey(r.id,d),ov=S.overrides[k]||{};
+      out.push({kind:'s',key:k,r,date:d,type:r.type,amount:ov.amount!==undefined?ov.amount:r.amount,cat:ov.cat||r.cat,note:ov.note!==undefined?ov.note:r.name,skip:!!ov.skip});
+    }
+  }
+  S.pending.forEach(p=>{if(p.date<from||p.date>to)return;const r=S.recurring.find(x=>x.id===p.rid);if(!r)return;const ov=S.overrides[okey(r.id,p.date)]||{};
+    out.push({kind:'p',key:p.id,r,date:p.date,type:r.type,amount:p.amount,cat:ov.cat||r.cat,note:ov.note!==undefined?ov.note:r.name,skip:false})});
+  return out;
+}
 function runRecurring(){
   const today=todayStr();let auto=0,pend=0,changed=false;
   for(const r of S.recurring){
@@ -391,8 +427,10 @@ function runRecurring(){
     let d=addDays(r.lastRun,1),guard=0;
     while(d<=stop&&guard++<5000){
       if(d>=r.start&&matches(r,d)){
-        if(r.mode==='auto'){S.tx.push({id:uid(),type:r.type,amount:r.amount,cat:r.cat,date:d,note:r.name,rid:r.id,created:Date.now()});auto++}
-        else if(!S.pending.some(p=>p.rid===r.id&&p.date===d)){S.pending.push({id:uid(),rid:r.id,date:d,amount:r.amount});pend++}
+        const k=okey(r.id,d),ov=S.overrides[k];
+        if(ov&&ov.skip){delete S.overrides[k]}
+        else if(r.mode==='auto'){S.tx.push(occTx(r,d,ov&&ov.amount!==undefined?ov.amount:r.amount));delete S.overrides[k];auto++}
+        else if(!S.pending.some(p=>p.rid===r.id&&p.date===d)){S.pending.push({id:uid(),rid:r.id,date:d,amount:ov&&ov.amount!==undefined?ov.amount:r.amount});pend++}
       }
       d=addDays(d,1);
     }
@@ -417,7 +455,8 @@ function periodOf(ds,b){
   if(b.period==='month')return monthRange(ds.slice(0,7));
   const d=parseD(ds),off=(d.getDay()-(S.settings.weekStart||0)+7)%7,a=addDays(ds,-off);return [a,addDays(a,6)];
 }
-const budgetSpend=(list,b)=>round2(list.reduce((s,t)=>t.type==='expense'&&!(b.excludeFixed&&t.rid)?s+t.amount:s,0));
+function inBudget(t,b=budgetCfg()){if(t.type!=='expense')return false;if(t.nb!==undefined)return !t.nb;return !(b&&b.excludeFixed&&t.rid)}
+const budgetSpend=(list,b)=>round2(list.reduce((s,t)=>inBudget(t,b)?s+t.amount:s,0));
 function budgetInfo(ref=todayStr()){
   const b=budgetCfg();if(!b)return null;
   const [a,e]=periodOf(ref,b),days=dayDiff(a,e)+1,elapsed=dayDiff(a,ref)+1,left=days-elapsed+1;
@@ -451,7 +490,12 @@ function monthNav(key,k){
 }
 function txRow(t){
   const c=getCat(t.cat);
-  return `<button class="row" data-act="editTx" data-id="${t.id}"><span class="ico" style="--cbg:${tint(c.color)}">${esc(c.icon)}</span><span class="row-main"><span class="row-t">${esc(c.name)}${t.rid?'<i class="tag">固定</i>':''}</span>${t.note?`<span class="row-s">${esc(t.note)}</span>`:''}</span><span class="amt num ${t.type}">${t.type==='income'?'+':'−'}${fmt(t.amount)}</span></button>`;
+  return `<button class="row" data-act="editTx" data-id="${t.id}"><span class="ico" style="--cbg:${tint(c.color)}">${esc(c.icon)}</span><span class="row-main"><span class="row-t">${esc(c.name)}${t.rid?'<i class="tag">固定</i>':''}${t.type==='expense'&&budgetCfg()&&!inBudget(t)?'<i class="tag ghost">不扣預算</i>':''}</span>${t.note?`<span class="row-s">${esc(t.note)}</span>`:''}</span><span class="amt num ${t.type}">${t.type==='income'?'+':'−'}${fmt(t.amount)}</span></button>`;
+}
+
+function schedRow(x){
+  const c=getCat(x.cat),tag=x.kind==='p'?'待確認':x.skip?'這次略過':'預定';
+  return `<button class="row sched ${x.skip?'skipped':''}" data-act="occ" data-kind="${x.kind}" data-key="${esc(x.key)}"><span class="ico" style="--cbg:${tint(c.color)}">${esc(c.icon)}</span><span class="row-main"><span class="row-t">${esc(c.name)}<i class="tag ${x.kind==='p'?'':'ghost'}">${tag}</i></span><span class="row-s">${esc(x.note)}</span></span><span class="amt num">${x.type==='income'?'+':'−'}${fmt(x.amount)}</span></button>`;
 }
 
 /* ---------- 明細 ---------- */
@@ -497,17 +541,19 @@ function calendar(list){
   const [y,m]=V.month.split('-').map(Number),n=dim(y,m),ws=S.settings.weekStart||0,T=todayStr(),bc=budgetCfg(),bi=budgetInfo();
   const lead=(new Date(y,m-1,1).getDay()-ws+7)%7;
   const by={};
-  list.forEach(t=>{const o=by[t.date]||(by[t.date]={exp:0,inc:0,bexp:0});
-    if(t.type==='expense'){o.exp+=t.amount;if(!(bc&&bc.excludeFixed&&t.rid))o.bexp+=t.amount}else o.inc+=t.amount});
+  const nb=d=>by[d]||(by[d]={exp:0,inc:0,bexp:0,sexp:0,sch:0});
+  list.forEach(t=>{const o=nb(t.date);
+    if(t.type==='expense'){o.exp+=t.amount;if(inBudget(t,bc))o.bexp+=t.amount}else o.inc+=t.amount});
+  scheduled(`${V.month}-01`,`${V.month}-${pad(n)}`).forEach(x=>{if(x.skip)return;const o=nb(x.date);o.sch++;if(x.type==='expense')o.sexp+=x.amount});
   let cells='<span></span>'.repeat(lead);
   for(let d=1;d<=n;d++){
     const ds=`${V.month}-${pad(d)}`,o=by[ds],lim=ds===T&&bi?bi.todayAllow:dayLimit(ds),over=!!(o&&lim!==null&&o.bexp>lim+0.001);
     const cls=['cd',ds===T?'today':'',ds===V.day?'sel':'',over?'over':'',ds>T?'future':''].join(' ');
-    cells+=`<button class="${cls}" data-act="pickDay" data-d="${ds}" aria-label="${m}月${d}日${o?`，支出 ${fmt(o.exp)}`:''}"><span class="cd-n num">${d}</span>${o&&o.exp?`<span class="cd-a num">${shortAmt(o.exp)}</span>`:''}${o&&o.inc?'<i class="cd-i"></i>':''}</button>`;
+    cells+=`<button class="${cls}" data-act="pickDay" data-d="${ds}" aria-label="${m}月${d}日${o?`，支出 ${fmt(o.exp)}`:''}"><span class="cd-n num">${d}</span>${o&&o.exp?`<span class="cd-a num">${shortAmt(o.exp)}</span>`:o&&o.sexp?`<span class="cd-a num sch">${shortAmt(o.sexp)}</span>`:''}${o&&o.inc?'<i class="cd-i"></i>':''}${o&&o.sch?'<i class="cd-s"></i>':''}</button>`;
   }
   const heads=Array.from({length:7},(_,i)=>`<span>${WD[(i+ws)%7]}</span>`).join('');
   const lim=dayLimit(`${V.month}-01`);
-  return `<section class="cal"><div class="cal-h">${heads}</div><div class="cal-g">${cells}</div><div class="cal-legend">${lim?`<span><i class="lg over"></i>超過當天額度（平均每天 $${fmt(Math.floor(lim))}）</span>`:''}<span><i class="lg inc"></i>當天有收入</span></div></section>`;
+  return `<section class="cal"><div class="cal-h">${heads}</div><div class="cal-g">${cells}</div><div class="cal-legend">${lim?`<span><i class="lg over"></i>超過當天額度（平均每天 $${fmt(Math.floor(lim))}）</span>`:''}<span><i class="lg inc"></i>當天有收入</span><span><i class="lg sch"></i>預定的固定收支</span></div></section>`;
 }
 function dayDetail(){
   const ds=V.day,dt=parseD(ds),items=S.tx.filter(t=>t.date===ds).sort(sortTx),bc=budgetCfg();
@@ -518,8 +564,11 @@ function dayDetail(){
     if(isT)sub+=`，今天額度 $${fmt(Math.floor(lim))}`;
     sub+=be>lim+0.001?`，<span class="over">超出 $${fmt(Math.ceil(be-lim))}</span>`:items.length?`，<span class="ok">在額度內</span>`:'';
   }
+  const sch=scheduled(ds,ds),sx=round2(sch.filter(x=>!x.skip&&x.type==='expense').reduce((a,x)=>a+x.amount,0));
+  if(sx)sub+=`，預定支出 $${fmt(sx)}`;
   let h=`<section class="day-sel" id="daySel"><div class="ds-h"><div><b>${dt.getMonth()+1}月${dt.getDate()}日 週${WD[dt.getDay()]}</b>${ds===todayStr()?' <span class="muted">今天</span>':''}<div class="ds-sub">${sub}</div></div><button class="ds-add" data-act="add">＋ 記在這天</button></div>`;
-  h+=items.length?`<div class="group">${items.map(txRow).join('')}</div>`:`<div class="day-empty">這天沒有紀錄</div>`;
+  if(items.length||!sch.length)h+=items.length?`<div class="group">${items.map(txRow).join('')}</div>`:`<div class="day-empty">這天沒有紀錄</div>`;
+  if(sch.length)h+=`<div class="sub-h">固定收支（點一下可以只修改這一次）</div><div class="group">${sch.map(schedRow).join('')}</div>`;
   return h+'</section>';
 }
 
@@ -672,13 +721,14 @@ function openEntry(tx){
   const edit=!!tx;
   let type=tx?tx.type:'expense',amt=tx?String(tx.amount):'',cat=tx?tx.cat:null;
   let date=tx?tx.date:(V.tab==='list'&&S.settings.listView!=='list'&&V.day?V.day:(V.month===todayStr().slice(0,7)||V.tab!=='list'?todayStr():`${V.month}-01`));
+  let inB=tx&&tx.type==='expense'?inBudget(tx):true;
   const pickDefaultCat=()=>{const cs=catsOf(type);cat=(S.lastCat[type]&&cs.some(c=>c.id===S.lastCat[type]))?S.lastCat[type]:cs[0]?.id};
   if(!cat)pickDefaultCat();
   openSheet((el,api)=>{
     el.innerHTML=`${head('',`<button class="link" data-x="cancel">取消</button>`,edit?`<button class="link danger" data-x="del">刪除</button>`:'')}
       <div class="amount-box"><span class="amount-cat"><span class="ico" id="eIco"></span><span id="eName"></span></span><span class="amount num" id="eAmt"></span></div>
       <div class="cat-grid" id="eCats"></div>
-      <div class="meta"><label class="pill">📅 <span id="eDateL"></span><input type="date" id="eDate" value="${date}"></label><input class="note" id="eNote" placeholder="備註（選填）" maxlength="60" value="${esc(tx?.note||'')}" enterkeyhint="done"></div>
+      <div class="meta"><label class="pill">📅 <span id="eDateL"></span><input type="date" id="eDate" value="${date}"></label><button class="pill bpill" id="eBud" type="button"></button><input class="note" id="eNote" placeholder="備註（選填）" maxlength="60" value="${esc(tx?.note||'')}" enterkeyhint="done"></div>
       <div class="keypad">${['1','2','3','⌫','4','5','6','C','7','8','9','ok','00','0','.'].map(k=>k==='ok'?`<button class="key ok" data-k="ok">${edit?'儲存':'記下'}</button>`:`<button class="key ${/[⌫C]/.test(k)?'fn':''} num" data-k="${k}">${k}</button>`).join('')}</div>`;
     const hd=el.querySelector('.sh-head h3');
     hd.innerHTML=`<div class="seg" style="width:150px"><button data-t="expense">支出</button><button data-t="income">收入</button></div>`;
@@ -692,7 +742,10 @@ function openEntry(tx){
       el.querySelector('.key.ok').className=`key ok ${type==='income'?'inc':'exp'}`;
       $$('.cat',el).forEach(b=>b.classList.toggle('on',b.dataset.id===cat));
       const d=parseD(date);$('#eDateL',el).textContent=date===todayStr()?'今天':`${d.getMonth()+1}/${d.getDate()}`;
+      const bb=$('#eBud',el);bb.hidden=!(type==='expense'&&budgetCfg());bb.textContent=inB?'🎯 扣預算':'不扣預算';bb.classList.toggle('off',!inB);
+      bb.setAttribute('aria-pressed',inB?'true':'false');
     };
+    $('#eBud',el).onclick=()=>{inB=!inB;draw();toast(inB?'這筆會扣除支出預算':'這筆不扣支出預算')};
     const drawCats=()=>{
       $('#eCats',el).innerHTML=catsOf(type).map(c=>`<button class="cat" data-id="${c.id}" style="--cc:${c.color}"><span class="ico" style="--cbg:${tint(c.color)}">${esc(c.icon)}</span>${esc(c.name)}</button>`).join('')+`<button class="cat add" data-add="1"><span class="ico">＋</span>新增</button>`;
       draw();
@@ -731,13 +784,15 @@ function openEntry(tx){
       if(!v||v<=0){toast('請輸入金額');return}
       if(!cat){toast('請選擇分類');return}
       const note=$('#eNote',el).value.trim();
-      if(edit){Object.assign(tx,{type,amount:v,cat,date,note})}
-      else S.tx.push({id:uid(),type,amount:v,cat,date,note,created:Date.now()});
+      const t=edit?tx:{id:uid(),created:Date.now()};
+      Object.assign(t,{type,amount:v,cat,date,note});
+      if(type!=='expense')delete t.nb;else if(budgetCfg())t.nb=!inB;
+      if(!edit)S.tx.push(t);
       S.lastCat[type]=cat;save();
       if(V.tab==='list'){V.month=date.slice(0,7);V.day=date}
       api.close();render();
       let msg=edit?'已儲存變更':`已記下 ${type==='income'?'收入':'支出'} $${fmt(v)}`;
-      const bi=type==='expense'&&date===todayStr()?budgetInfo():null;
+      const bi=type==='expense'&&inB&&date===todayStr()?budgetInfo():null;
       if(bi&&!edit)msg+=bi.todayLeft<0?`，今天已超出額度 $${fmt(Math.ceil(-bi.todayLeft))}`:`，今天還能花 $${fmt(Math.floor(bi.todayLeft))}`;
       toast(msg);
     };
@@ -835,7 +890,8 @@ function deleteCat(cat,done){
 /* ---------- 固定收支編輯 ---------- */
 function openRecEditor(r){
   const edit=!!r,T=todayStr();
-  const d=r?{...r}:{type:'expense',name:'',amount:'',cat:null,freq:'monthly',day:+T.slice(8),weekday:parseD(T).getDay(),month:+T.slice(5,7),start:T,end:'',mode:'auto',active:true};
+  const defIn=!(S.settings.budget&&S.settings.budget.excludeFixed===false)?false:true;
+  const d=r?{...r,inBudget:r.inBudget===undefined?!(S.settings.budget?S.settings.budget.excludeFixed!==false:true):r.inBudget}:{inBudget:defIn,type:'expense',name:'',amount:'',cat:null,freq:'monthly',day:+T.slice(8),weekday:parseD(T).getDay(),month:+T.slice(5,7),start:T,end:'',mode:'auto',active:true};
   if(!d.cat||!catsOf(d.type).some(c=>c.id===d.cat))d.cat=catsOf(d.type)[0]?.id;
   openSheet((el,api)=>{
     const read=()=>{
@@ -855,6 +911,7 @@ function openRecEditor(r){
           d.freq==='weekly'?`<div class="chips">${[...WD].map((w,i)=>`<button class="chip ${i===d.weekday?'on':''}" data-wd="${i}">週${w}</button>`).join('')}</div>`:
           `<div class="inline"><span>每年</span><select class="input" id="rMon">${opts(12,d.month,' 月')}</select><select class="input" id="rDay">${opts(31,d.day,' 日')}</select></div>`
         }</div></div>
+      ${d.type==='expense'?`<div class="field"><span class="flabel">支出預算</span><div class="seg"><button data-ib="1" class="${d.inBudget?'on':''}">扣預算</button><button data-ib="0" class="${!d.inBudget?'on':''}">不扣預算</button></div><p class="hint">決定之後自動記下的這筆要不要算進每日額度。日曆上的單一筆也可以另外調整。</p></div>`:''}
       <div class="field"><span class="flabel">入帳方式</span><div class="seg"><button data-m="auto" class="${d.mode==='auto'?'on':''}">自動入帳</button><button data-m="confirm" class="${d.mode==='confirm'?'on':''}">待我確認</button></div>
         <p class="hint">${d.mode==='auto'?'到了日期就自動記下這筆，適合金額固定的項目，例如房租、訂閱費。':'到了日期先列入「待確認」，你可以修改金額再記下，適合每期金額不同的項目，例如電費、信用卡費。'}</p></div>
       <div class="field"><label for="rStart">開始日期</label><input class="input" type="date" id="rStart" value="${d.start}"></div>
@@ -869,7 +926,8 @@ function openRecEditor(r){
       if(b.dataset.x==='cancel')return api.close();
       if(b.dataset.x==='del'){
         if(await confirmBox(`刪除「${r.name}」？`,'之後不會再自動記帳，已經記下的紀錄會保留。','刪除',true)){
-          S.recurring=S.recurring.filter(x=>x.id!==r.id);S.pending=S.pending.filter(p=>p.rid!==r.id);save();api.close();render();toast('已刪除固定收支');
+          S.recurring=S.recurring.filter(x=>x.id!==r.id);S.pending=S.pending.filter(p=>p.rid!==r.id);
+          for(const k in S.overrides)if(k.startsWith(r.id+'|'))delete S.overrides[k];save();api.close();render();toast('已刪除固定收支');
         }return;
       }
       if(b.dataset.x==='save'){
@@ -880,7 +938,7 @@ function openRecEditor(r){
         if(!d.cat){toast('請選擇分類');return}
         if(d.end&&d.end<d.start){toast('結束日期不能早於開始日期');return}
         const T2=todayStr();
-        const base={type:d.type,name:d.name.trim(),amount,cat:d.cat,freq:d.freq,day:d.day,weekday:d.weekday,month:d.month,start:d.start,end:d.end||'',mode:d.mode,active:d.active};
+        const base={type:d.type,name:d.name.trim(),amount,cat:d.cat,freq:d.freq,day:d.day,weekday:d.weekday,month:d.month,start:d.start,end:d.end||'',mode:d.mode,active:d.active,inBudget:d.type==='expense'?d.inBudget:undefined};
         if(edit){
           const wasActive=r.active;Object.assign(r,base);
           if(r.start>T2)r.lastRun=addDays(r.start,-1);
@@ -897,6 +955,7 @@ function openRecEditor(r){
       else if(b.dataset.wd)d.weekday=+b.dataset.wd;
       else if(b.dataset.m)d.mode=b.dataset.m;
       else if(b.dataset.a)d.active=b.dataset.a==='1';
+      else if(b.dataset.ib)d.inBudget=b.dataset.ib==='1';
       else return;
       const sc=el.querySelector('.sh-body').scrollTop;draw();el.querySelector('.sh-body').scrollTop=sc;
     };
@@ -918,7 +977,8 @@ function openPending(){
     };
     const confirmP=(p,amount)=>{
       const r=S.recurring.find(x=>x.id===p.rid);
-      if(r)S.tx.push({id:uid(),type:r.type,amount,cat:r.cat,date:p.date,note:r.name,rid:r.id,created:Date.now()});
+      if(r)S.tx.push(occTx(r,p.date,amount));
+      delete S.overrides[okey(p.rid,p.date)];
       S.pending=S.pending.filter(x=>x.id!==p.id);
     };
     draw();
@@ -929,10 +989,64 @@ function openPending(){
       const id=b.dataset.ok||b.dataset.skip;if(!id)return;
       const p=S.pending.find(x=>x.id===id);if(!p)return;
       if(b.dataset.ok){const v=round2(parseFloat(b.closest('.pend').querySelector('input').value.replace(/,/g,'')));if(!v||v<=0){toast('請輸入金額');return}confirmP(p,v);toast(`已記下 $${fmt(v)}`)}
-      else S.pending=S.pending.filter(x=>x.id!==id);
+      else{S.pending=S.pending.filter(x=>x.id!==id);delete S.overrides[okey(p.rid,p.date)]}
       save();draw();
     };
   },{onClose:render});
+}
+
+/* ---------- 固定收支：單次修改 ---------- */
+function openOccurrence(kind,key){
+  const T=todayStr();
+  const x=kind==='p'?(()=>{const p=S.pending.find(q=>q.id===key);return p?scheduled(p.date,p.date).find(y=>y.kind==='p'&&y.key===key):null})()
+    :(()=>{const [rid,d]=key.split('|');return scheduled(d,d).find(y=>y.kind==='s'&&y.key===key)})();
+  if(!x){toast('找不到這筆固定收支');render();return}
+  const r=x.r,k=okey(r.id,x.date),ov0=S.overrides[k]||{};
+  const st={amount:String(x.amount),cat:x.cat,note:x.note,nb:ov0.nb!==undefined?ov0.nb:(recNb(r)!==undefined?recNb(r):!!(budgetCfg()&&budgetCfg().excludeFixed))};
+  const dt=parseD(x.date),dLabel=`${dt.getFullYear()}/${dt.getMonth()+1}/${dt.getDate()}（週${WD[dt.getDay()]}）`;
+  openSheet((el,api)=>{
+    const read=()=>{st.amount=$('#oAmt',el).value;st.note=$('#oNote',el).value};
+    const draw=()=>{
+      el.innerHTML=`${head(esc(r.name),`<button class="link" data-x="cancel">取消</button>`,`<button class="link strong" data-x="save">${kind==='p'?'記下':'儲存'}</button>`)}<div class="sh-body">
+        <div class="callout">${dLabel}的${r.type==='income'?'固定收入':'固定支出'}，${freqText(r)}。<br>${kind==='p'?'這筆等待你確認，可以先調整金額再記下。':'在這裡修改<b>只會影響這一次</b>，其他月份不變。到了日期會照這裡的內容記帳。'}</div>
+        <div class="field"><label for="oAmt">這次的金額</label><input class="input num" id="oAmt" inputmode="decimal" value="${esc(st.amount)}"></div>
+        <div class="field"><span class="flabel">分類</span><div class="chips">${catsOf(r.type).map(c=>`<button class="chip ${c.id===st.cat?'on':''}" data-cat="${c.id}">${esc(c.icon)} ${esc(c.name)}</button>`).join('')}</div></div>
+        <div class="field"><label for="oNote">備註</label><input class="input" id="oNote" maxlength="60" value="${esc(st.note)}"></div>
+        ${r.type==='expense'&&budgetCfg()?`<div class="field"><span class="flabel">支出預算</span><div class="seg"><button data-nb="0" class="${!st.nb?'on':''}">扣預算</button><button data-nb="1" class="${st.nb?'on':''}">不扣預算</button></div></div>`:''}
+        ${kind==='s'?(x.skip?`<button class="btn ghost" data-x="unskip">恢復這一次</button>`:`<button class="btn ghost" data-x="skip">這次略過（不記帳）</button>`):`<button class="btn ghost" data-x="pskip">這次略過（不記帳）</button>`}
+        <button class="btn ghost" data-x="rule" style="margin-top:10px">修改整個固定收支設定</button>
+      </div>`;
+    };
+    draw();
+    const commitOv=extra=>{
+      const ov={...(S.overrides[k]||{}),...extra};
+      const a=round2(parseFloat(String(st.amount).replace(/,/g,'')));
+      if(a&&a!==r.amount)ov.amount=a;else delete ov.amount;
+      if(st.cat!==r.cat)ov.cat=st.cat;else delete ov.cat;
+      if(st.note!==r.name)ov.note=st.note;else delete ov.note;
+      if(r.type==='expense'&&budgetCfg())ov.nb=st.nb;
+      if(Object.keys(ov).length)S.overrides[k]=ov;else delete S.overrides[k];
+      return a;
+    };
+    el.onclick=e=>{
+      const b=e.target.closest('button');if(!b)return;
+      if(b.dataset.x==='cancel')return api.close();
+      if(b.dataset.x==='rule'){api.close();openRecEditor(r);return}
+      read();
+      if(b.dataset.cat){st.cat=b.dataset.cat;draw();return}
+      if(b.dataset.nb){st.nb=b.dataset.nb==='1';draw();return}
+      if(b.dataset.x==='skip'){commitOv({skip:true});save();api.close();render();toast(`${+x.date.slice(5,7)}/${+x.date.slice(8)} 的${r.name}這次略過`,'復原',()=>{delete S.overrides[k].skip;if(!Object.keys(S.overrides[k]).length)delete S.overrides[k];save();render()});return}
+      if(b.dataset.x==='unskip'){const ov=S.overrides[k]||{};delete ov.skip;S.overrides[k]=ov;commitOv({});save();api.close();render();toast('已恢復這一次');return}
+      if(b.dataset.x==='pskip'){S.pending=S.pending.filter(p=>p.id!==key);delete S.overrides[k];save();api.close();render();toast('這次略過');return}
+      if(b.dataset.x==='save'){
+        const a=round2(parseFloat(String(st.amount).replace(/,/g,'')));
+        if(!a||a<=0){toast('請輸入金額');return}
+        commitOv({});
+        if(kind==='p'){const p=S.pending.find(q=>q.id===key);if(p){S.tx.push(occTx(r,p.date,a));S.pending=S.pending.filter(q=>q.id!==key);delete S.overrides[k]}save();api.close();render();toast(`已記下 $${fmt(a)}`);return}
+        save();api.close();render();toast('已儲存這一次的修改');
+      }
+    };
+  });
 }
 
 /* ---------- 預算設定 ---------- */
@@ -951,7 +1065,7 @@ function openBudget(){
         <div class="field"><label for="bAmt">${b.period==='week'?'每週':'每月'}可以花的金額</label><input class="input num" id="bAmt" inputmode="decimal" value="${esc(b.amount)}" placeholder="${b.period==='week'?'例如 3000':'例如 12000'}"></div>
         <div class="callout" id="bPrev">${prev()}</div>
         <div class="field"><span class="flabel">固定支出（房租、保險、訂閱費等）</span><div class="seg"><button data-fx="1" class="${b.excludeFixed?'on':''}">不算進預算</button><button data-fx="0" class="${!b.excludeFixed?'on':''}">算進預算</button></div>
-          <p class="hint">建議選「不算進預算」，預算只管日常花費，每日額度才不會被房租這類大筆固定支出吃掉。</p></div>`}
+          <p class="hint">這是預設值，建議選「不算進預算」，每日額度才不會被房租這類大筆支出吃掉。每個固定收支和每一筆紀錄都還可以個別調整。</p></div>`}
         <div class="field"><span class="flabel">每週從哪一天開始</span><div class="seg"><button data-ws="0" class="${ws===0?'on':''}">星期日</button><button data-ws="1" class="${ws===1?'on':''}">星期一</button></div><p class="hint">每週預算和日曆的排列都會用這個設定。</p></div>
       </div>`;
       const a=$('#bAmt',el);if(a)a.oninput=e=>{b.amount=e.target.value;$('#bPrev',el).innerHTML=prev()};
@@ -1115,22 +1229,22 @@ const XL=(()=>{
 /* ---------- 報表內容 ---------- */
 const stamp=()=>{const n=new Date();return `${n.getFullYear()}/${pad(n.getMonth()+1)}/${pad(n.getDate())} ${pad(n.getHours())}:${pad(n.getMinutes())}`};
 function detailSheet(list,title){
-  const sh=new XL.Sheet('明細');sh.widths=[12,8,14,13,13,30,8];
-  sh.set(0,0,title,'title');sh.merges.push('A1:G1');sh.heights[0]=26;
-  sh.set(1,0,`共 ${list.length} 筆，匯出於 ${stamp()}`,'note');sh.merges.push('A2:G2');
-  ['日期','類型','分類','收入','支出','備註','來源'].forEach((t,i)=>sh.set(3,i,t,'head'));
+  const sh=new XL.Sheet('明細');sh.widths=[12,8,14,13,13,30,8,8];
+  sh.set(0,0,title,'title');sh.merges.push('A1:H1');sh.heights[0]=26;
+  sh.set(1,0,`共 ${list.length} 筆，匯出於 ${stamp()}`,'note');sh.merges.push('A2:H2');
+  ['日期','類型','分類','收入','支出','備註','來源','扣預算'].forEach((t,i)=>sh.set(3,i,t,'head'));
   const rows=[...list].sort((a,b)=>a.date.localeCompare(b.date)||(a.created||0)-(b.created||0));
   let r=4;
-  if(!rows.length){sh.set(r,0,'（這段期間沒有紀錄）','txt');sh.merges.push(`A5:G5`);r++}
+  if(!rows.length){sh.set(r,0,'（這段期間沒有紀錄）','txt');sh.merges.push(`A5:H5`);r++}
   rows.forEach(t=>{const c=getCat(t.cat);
     sh.set(r,0,XL.serial(t.date),'date');sh.set(r,1,t.type==='income'?'收入':'支出','txtC');sh.set(r,2,c.name,'txt');
     sh.set(r,3,t.type==='income'?t.amount:null,'num');sh.set(r,4,t.type==='expense'?t.amount:null,'num');
-    sh.set(r,5,t.note||'','txt');sh.set(r,6,t.rid?'固定':'','txtC');r++});
+    sh.set(r,5,t.note||'','txt');sh.set(r,6,t.rid?'固定':'','txtC');sh.set(r,7,t.type==='expense'?(inBudget(t)?'是':'否'):'','txtC');r++});
   const last=r;
-  if(rows.length)sh.filter=`A4:G${last}`;
+  if(rows.length)sh.filter=`A4:H${last}`;
   const ti=total(list,'income'),te=total(list,'expense');
-  sh.fill(r,0,6,'totL');sh.set(r,0,'合計','totL');sh.set(r,3,ti,'totN',`SUM(D5:D${last})`);sh.set(r,4,te,'totN',`SUM(E5:E${last})`);r++;
-  sh.fill(r,0,6,'netL');sh.set(r,0,'結餘（收入 − 支出）','netL');sh.set(r,4,round2(ti-te),'netN',`D${r}-E${r}`);
+  sh.fill(r,0,7,'totL');sh.set(r,0,'合計','totL');sh.set(r,3,ti,'totN',`SUM(D5:D${last})`);sh.set(r,4,te,'totN',`SUM(E5:E${last})`);r++;
+  sh.fill(r,0,7,'netL');sh.set(r,0,'結餘（收入 − 支出）','netL');sh.set(r,4,round2(ti-te),'netN',`D${r}-E${r}`);
   sh.freeze={y:4};
   return sh;
 }
@@ -1164,10 +1278,10 @@ function monthBook(key){
     r++;sh.fill(r,0,3,'sec');sh.set(r,0,'預算','sec');r++;
     const mb=bcf.period==='month'?bcf.amount:round2(bcf.amount/7*days),used=budgetSpend(list,bcf),b0=r;
     sh.set(r,0,bcf.period==='month'?'本月預算':`本月預算（每週 $${fmt(bcf.amount)} × ${days}/7）`,'txt');sh.set(r,1,mb,'num');sh.set(r,2,null,'txt');sh.set(r,3,null,'txt');r++;
-    sh.set(r,0,bcf.excludeFixed?'計入預算的支出（不含固定支出）':'計入預算的支出','txt');sh.set(r,1,used,'num');sh.set(r,2,mb?used/mb:0,'pct',`IF(B${b0+1}=0,0,B${r+1}/B${b0+1})`);sh.set(r,3,null,'txt');r++;
+    sh.set(r,0,'計入預算的支出','txt');sh.set(r,1,used,'num');sh.set(r,2,mb?used/mb:0,'pct',`IF(B${b0+1}=0,0,B${r+1}/B${b0+1})`);sh.set(r,3,null,'txt');r++;
     sh.fill(r,0,3,'netL');sh.set(r,0,'預算剩餘（負數表示超支）','netL');sh.set(r,1,round2(mb-used),'netN',`B${b0+1}-B${b0+2}`);r++;
     sh.set(r,0,'每日額度','txt');sh.set(r,1,round2(mb/days),'num',`B${b0+1}/${days}`);sh.set(r,2,null,'txt');sh.set(r,3,null,'txt');r++;
-    const lim=mb/days,overDays=Object.values(list.filter(t=>t.type==='expense'&&!(bcf.excludeFixed&&t.rid)).reduce((m,t)=>{m[t.date]=(m[t.date]||0)+t.amount;return m},{})).filter(v=>v>lim+0.001).length;
+    const lim=mb/days,overDays=Object.values(list.filter(t=>inBudget(t,bcf)).reduce((m,t)=>{m[t.date]=(m[t.date]||0)+t.amount;return m},{})).filter(v=>v>lim+0.001).length;
     sh.set(r,0,'超過每日額度的天數','txt');sh.set(r,1,overDays,'num');sh.set(r,2,null,'txt');sh.set(r,3,null,'txt');
   }
   sh.freeze={y:4};
@@ -1275,6 +1389,7 @@ const ACT={
   pickDay:el=>{V.day=el.dataset.d;render();const d=$('#daySel');if(d){const r=d.getBoundingClientRect();if(r.top>innerHeight-160)d.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'auto':'smooth',block:'start'})}},
   toggleView:()=>{S.settings.listView=S.settings.listView==='list'?'calendar':'list';save();render()},
   budget:()=>openBudget(),
+  occ:el=>openOccurrence(el.dataset.kind,el.dataset.key),
   yShift:el=>{V.rYear+=+el.dataset.n;render()},
   rMode:el=>{V.rMode=el.dataset.v;if(V.rMode==='year')V.rYear=+V.rMonth.slice(0,4);render()},
   rType:el=>{V.rType=el.dataset.v;render()},
